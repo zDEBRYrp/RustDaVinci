@@ -21,7 +21,6 @@ default_settings = {
     "double_click": 0,
     "show_information": 1,
     "show_preview_load": 1,
-    "hide_preview_paint": 1,
     "paint_background":  0,
     "brush_opacities": 1,
     "hidden_colors": 0,
@@ -33,5 +32,4 @@ default_settings = {
     "brush_size": 15,
     "brush_interval": 0.01,
     "brush_opacity": 1.0,
-    "blackwhite_mode": 0
 }

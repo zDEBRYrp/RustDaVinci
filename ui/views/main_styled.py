@@ -45,12 +45,16 @@ class MainWindow(QMainWindow):
 
         # Setup rustDaVinci object
         self.rustDaVinci = rustDaVinci(self)
-        
-        # Compatibility attribute for old code
-        self.is_expanded = False
 
         # Setup UI
         self.setupUI()
+
+        # Лимит цветов — общая настройка с движком: восстановить в спинбокс.
+        try:
+            saved_max_colors = int(self.settings.value("paint_max_colors", 0))
+        except (TypeError, ValueError):
+            saved_max_colors = 0
+        self.maxColors_SpinBox.setValue(max(0, min(saved_max_colors, 256)))
 
         # Connect UI modules
         self.connectAll()
@@ -226,6 +230,17 @@ class MainWindow(QMainWindow):
         self.settings_PushButton = QPushButton("Настройки", self)
         self.settings_PushButton.setGeometry(260, 90, 120, 32)
         self.settings_PushButton.setStyleSheet(btn_style)
+
+        # Кнопка захвата панели: авто (OpenCV) / вручную (2 клика)
+        self.captureCtrlAuto_PushButton = QPushButton("Панель: авто", self)
+        self.captureCtrlAuto_PushButton.setGeometry(260, 123, 120, 28)
+        self.captureCtrlAuto_PushButton.setStyleSheet(btn_style)
+        self.captureCtrlAuto_PushButton.setToolTip("Найти панель инструментов через OpenCV")
+
+        self.captureCtrlManual_PushButton = QPushButton("Панель: вручную", self)
+        self.captureCtrlManual_PushButton.setGeometry(260, 156, 120, 28)
+        self.captureCtrlManual_PushButton.setStyleSheet(btn_style)
+        self.captureCtrlManual_PushButton.setToolTip("Указать панель двумя кликами")
         
         # Область предпросмотра
         self.preview_Label = QLabel("Предпросмотр", self)
@@ -313,13 +328,20 @@ class MainWindow(QMainWindow):
         
         self.onTop_PushButton.clicked.connect(self.on_top_clicked)
         self.settings_PushButton.clicked.connect(self.settings_clicked)
+        self.captureCtrlAuto_PushButton.clicked.connect(self.capture_ctrl_auto_clicked)
+        self.captureCtrlManual_PushButton.clicked.connect(self.capture_ctrl_manual_clicked)
         self.paint_image_PushButton.clicked.connect(self.paint_image_clicked)
         self.hexCoords_PushButton.clicked.connect(self.hex_coords_clicked)
         
         # Подключаем обновление предпросмотра при изменении параметров
-        self.maxColors_SpinBox.valueChanged.connect(self.on_preview_settings_changed)
+        self.maxColors_SpinBox.valueChanged.connect(self.on_max_colors_changed)
         self.blackwhite_CheckBox.clicked.connect(self.on_preview_settings_changed)
         self.skipBackground_CheckBox.clicked.connect(self.on_preview_settings_changed)
+
+    def on_max_colors_changed(self, value):
+        """Лимит цветов — общая настройка: persist + превью."""
+        self.settings.setValue("paint_max_colors", int(value))
+        self.on_preview_settings_changed()
 
 
     def on_preview_settings_changed(self):
@@ -355,13 +377,15 @@ class MainWindow(QMainWindow):
             self.maxColors_SpinBox.show()
 
 
+    def _after_image_loaded(self, log_text=None):
+        """После загрузки: кнопку решает движок, превью — по настройке."""
+        if log_text:
+            self.log_TextEdit.append(log_text)
+
     def load_image_file_clicked(self):
         """ Load image from file """
         self.rustDaVinci.load_image_from_file()
-        if self.rustDaVinci.org_img != None:
-            self.paint_image_PushButton.setEnabled(True)
-            self.update_preview()
-
+        self._after_image_loaded()
 
     def load_image_URL_clicked(self):
         """ Load image from URL """
@@ -369,11 +393,9 @@ class MainWindow(QMainWindow):
         if not url:
             QMessageBox.warning(self, "Ошибка", "Введите URL изображения")
             return
-        
+
         self.rustDaVinci.load_image_from_url(url)
-        if self.rustDaVinci.org_img != None:
-            self.paint_image_PushButton.setEnabled(True)
-            self.update_preview()
+        self._after_image_loaded()
 
 
     def load_image_clipboard_clicked(self):
@@ -398,11 +420,10 @@ class MainWindow(QMainWindow):
                 self.rustDaVinci.org_img_pixmap = QPixmap.fromImage(qimage)
 
                 self.rustDaVinci.convert_transparency()
-                self.rustDaVinci.create_pixmaps()
+                self.rustDaVinci.org_img_ok = True
+                self.rustDaVinci.update()
 
-                self.paint_image_PushButton.setEnabled(True)
-                self.update_preview()
-                self.log_TextEdit.append("Изображение загружено из буфера обмена")
+                self._after_image_loaded("Изображение загружено из буфера обмена")
             else:
                 QMessageBox.warning(self, "Ошибка", "Буфер обмена не содержит изображение")
         else:
@@ -415,15 +436,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # Получаем текущие настройки
+            # Настройки превью — локальные для окна (движок их не читает).
             blackwhite_mode = self.blackwhite_CheckBox.isChecked()
             skip_background = self.skipBackground_CheckBox.isChecked()
             max_colors = self.maxColors_SpinBox.value()
-
-            # Применяем настройки временно для предпросмотра
-            self.settings.setValue("blackwhite_mode", 1 if blackwhite_mode else 0)
-            self.settings.setValue("skip_background_auto", 1 if skip_background else 0)
-            self.settings.setValue("paint_max_colors", max_colors)
 
             # Создаем копию изображения для обработки
             preview_img = self.rustDaVinci.org_img.copy()
@@ -526,19 +542,19 @@ class MainWindow(QMainWindow):
 
     def paint_image_clicked(self):
         """ Start the painting process """
-        # Применить настройки режима одного цвета из чекбокса
-        blackwhite = self.blackwhite_CheckBox.isChecked()
-        self.settings.setValue("blackwhite_mode", 1 if blackwhite else 0)
-        
-        # Применить настройку пропуска фона
-        skip_bg = self.skipBackground_CheckBox.isChecked()
-        self.settings.setValue("skip_background_auto", 1 if skip_bg else 0)
-        
-        # Применить максимум цветов (0 = авто, без ограничений)
+        # Лимит цветов превью — единственный общий ключ с движком.
         max_colors = self.maxColors_SpinBox.value()
         self.settings.setValue("paint_max_colors", max_colors)
-        
+
         self.rustDaVinci.start_painting()
+
+    def capture_ctrl_auto_clicked(self):
+        """Автопоиск панели инструментов через OpenCV."""
+        self.rustDaVinci.locate_control_area_automatically()
+
+    def capture_ctrl_manual_clicked(self):
+        """Ручной захват панели двумя кликами."""
+        self.rustDaVinci.locate_control_area_manually()
 
     def settings_clicked(self):
         """ Create an instance of a settings window """

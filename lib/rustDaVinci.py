@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from PyQt5.QtCore import QSettings, Qt, QRect, QDir, QThread, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, QRect, QDir, QThread, QObject, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QMessageBox, QInputDialog, QFileDialog, QApplication, QLabel
 
@@ -15,7 +15,6 @@ import numpy
 import time
 import cv2
 import os
-import tempfile
 
 from lib.rustPaletteData import rust_palette
 from lib.captureArea import capture_area, capture_point
@@ -24,26 +23,17 @@ from ui.dialogs.captureDialog import CaptureAreaDialog
 from ui.settings.default_settings import default_settings
 
 
-class _SaveTempPng:
-    """Контекст-менеджер временного PNG-файла (PIL <-> QPixmap без мусора в CWD)."""
+def _pil_to_qimage(image):
+    """PIL Image -> QImage без временных файлов (копия отвязана от bytes)."""
+    from PyQt5.QtGui import QImage
 
-    def __init__(self, image):
-        self.image = image
-        self.path = None
+    rgba = image.convert("RGBA")
+    data = rgba.tobytes("raw", "RGBA")
+    return QImage(data, rgba.width, rgba.height, QImage.Format_RGBA8888).copy()
 
-    def __enter__(self):
-        handle, self.path = tempfile.mkstemp(suffix=".png")
-        os.close(handle)
-        self.image.save(self.path)
-        return self.path
 
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if self.path and os.path.exists(self.path):
-                os.remove(self.path)
-        except OSError:
-            pass
-        return False
+def _pil_to_qpixmap(image):
+    return QPixmap.fromImage(_pil_to_qimage(image))
 
 
 class PaintingWorker(QThread):
@@ -74,6 +64,23 @@ class PaintingWorker(QThread):
             self.aborted.emit(int(time.time() - self.engine.paint_start_time))
 
 
+class _UiBridge(QObject):
+    """QObject-посредник: сигналы воркера гарантированно идут в GUI-поток очередью."""
+
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int)
+    finished_ok = pyqtSignal(int)
+    aborted = pyqtSignal(int)
+
+    def __init__(self, engine, parent=None):
+        super().__init__(parent)
+        self._engine = engine
+        self.log.connect(engine._append_log, Qt.QueuedConnection)
+        self.progress.connect(engine._set_progress, Qt.QueuedConnection)
+        self.finished_ok.connect(lambda elapsed: engine.shutdown(engine.paint_listener, engine.paint_start_time, 0), Qt.QueuedConnection)
+        self.aborted.connect(lambda elapsed: engine.shutdown(engine.paint_listener, engine.paint_start_time, 1), Qt.QueuedConnection)
+
+
 class rustDaVinci():
 
     def __init__(self, parent):
@@ -89,10 +96,7 @@ class rustDaVinci():
         self.updated_palette = None
 
         # Pixmaps
-        self.pixmap_on_display = 0
         self.org_img_pixmap = None
-        self.quantized_img_pixmap_normal = None
-        self.quantized_img_pixmap_high = None
 
         # Booleans
         self.org_img_ok = False
@@ -149,6 +153,7 @@ class rustDaVinci():
 
         # Поток рисования и состояние цикла
         self.paint_thread = None
+        self.ui_bridge = None
         self.paint_start_time = 0
         self.paint_listener = None
         self.prefer_lines = False
@@ -248,6 +253,8 @@ class rustDaVinci():
         self._set_widget_enabled("loadFromFile_PushButton", enabled)
         self._set_widget_enabled("loadFromUrl_PushButton", enabled)
         self._set_widget_enabled("loadFromClipboard_PushButton", enabled)
+        self._set_widget_enabled("captureCtrlAuto_PushButton", enabled)
+        self._set_widget_enabled("captureCtrlManual_PushButton", enabled)
         self._set_widget_enabled("paint_image_PushButton", enabled)
         self._set_widget_enabled("settings_PushButton", enabled)
 
@@ -270,6 +277,17 @@ class rustDaVinci():
                 pass
 
 
+    def _set_image_loaded(self, template):
+        """Общий финал загрузки: шаблон -> org_img -> превью. Кнопку решает update()."""
+        self.org_img_template = template
+        self.org_img = template.copy()
+        self.org_img_pixmap = _pil_to_qpixmap(self.org_img)
+        self.convert_transparency()
+        self.org_img_ok = True
+        if self._setting_bool("show_preview_load", default_settings["show_preview_load"]):
+            self._show_preview_if_supported()
+        self._clear_log_and_progress()
+
     def load_image_from_file(self):
         """ Load image from a file """
         title = "Выберите изображение для рисования"
@@ -284,26 +302,9 @@ class rustDaVinci():
         if path.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
             try:
                 self.settings.setValue("folder_path", path)
-                # Pixmap for original image
-                self.org_img_pixmap = QPixmap(path, "1")
-
-                self.org_img_template = Image.open(path).convert("RGBA")
-                self.org_img = self.org_img_template.copy()
-
-                self.convert_transparency()
-                self.create_pixmaps()
-
-                if self._setting_bool("show_preview_load", default_settings["show_preview_load"]):
-                    if self._setting_int("quality", default_settings["quality"]) == 0:
-                        self.pixmap_on_display = 1
-                    else:
-                        self.pixmap_on_display = 2
-
-                    self._show_preview_if_supported()
-                else:
-                    self.pixmap_on_display = 0
-
-                self._clear_log_and_progress()
+                with Image.open(path) as opened:
+                    template = opened.convert("RGBA")
+                self._set_image_loaded(template)
 
             except Exception as e:
                 self.org_img = None
@@ -340,31 +341,13 @@ class rustDaVinci():
 
         if url != "":
             try:
-                headers = {'User-Agent':'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'}
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) RustDaVinci/1.0'}
                 request = urllib.request.Request(url, None, headers)
-                self.org_img_template = Image.open(urllib.request.urlopen(request)).convert("RGBA")
-
-                # Pixmap for original image
-                with _SaveTempPng(self.org_img_template) as tmp_path:
-                    self.org_img_pixmap = QPixmap(tmp_path, "1")
-
-                # The original PIL.Image object
-                self.org_img = self.org_img_template.copy()
-
-                self.convert_transparency()
-                self.create_pixmaps()
-
-                if self._setting_bool("show_preview_load", default_settings["show_preview_load"]):
-                    if self._setting_int("quality", default_settings["quality"]) == 0:
-                        self.pixmap_on_display = 1
-                    else:
-                        self.pixmap_on_display = 2
-
-                    self._show_preview_if_supported()
-                else:
-                    self.pixmap_on_display = 0
-
-                self._clear_log_and_progress()
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    with Image.open(response) as opened:
+                        opened.load()
+                        template = opened.convert("RGBA")
+                self._set_image_loaded(template)
 
             except Exception as e:
                 self.org_img = None
@@ -396,21 +379,6 @@ class rustDaVinci():
             self.org_img = self.org_img_template.convert("RGB")
 
 
-    def create_pixmaps(self):
-        """ Create quantized pixmaps """
-        # Pixmap for quantized image of quality normal
-        temp_normal = self.quantize_to_palette(self.org_img, True, 0)
-        with _SaveTempPng(temp_normal.convert("RGB")) as tmp_path:
-            self.quantized_img_pixmap_normal = QPixmap(tmp_path)
-
-        # Pixmap for quantized image of quality high
-        temp_high = self.quantize_to_palette(self.org_img, True, 1)
-        with _SaveTempPng(temp_high.convert("RGB")) as tmp_path:
-            self.quantized_img_pixmap_high = QPixmap(tmp_path)
-
-        self.org_img_ok = True
-
-
     def convert_img(self):
         """ Convert the image to fit the canvas and quantize the image.
         Updates:    quantized_img,
@@ -418,6 +386,10 @@ class rustDaVinci():
                     y_correction
         Returns:    False, if the image type is invalid.
         """
+        if self.org_img is None or self.canvas_w <= 0 or self.canvas_h <= 0:
+            self.quantized_img = None
+            self.org_img_ok = False
+            return False
         org_img_w = self.org_img.size[0]
         org_img_h = self.org_img.size[1]
 
@@ -446,7 +418,7 @@ class rustDaVinci():
             resized_img = self.org_img.resize((self.canvas_w, self.canvas_h), resample_filter)
 
         self.quantized_img = self.quantize_to_palette(resized_img)
-        if self.quantized_img == False:
+        if self.quantized_img is None:
             self.org_img = None
             self.quantized_img = None
             self.org_img_ok = False
@@ -763,6 +735,29 @@ class rustDaVinci():
             self.update()
 
 
+    def _screenshot_active_monitor(self):
+        """Скриншот выбранного в настройках монитора (смещение = левый верхний угол)."""
+        from PyQt5.QtWidgets import QApplication
+
+        monitor_index = self._setting_int("monitor_index", 0)
+        try:
+            screens = QApplication.screens()
+        except Exception:
+            screens = []
+        if not screens:
+            return pyautogui.screenshot()
+        monitor_index = max(0, min(monitor_index, len(screens) - 1))
+        geometry = screens[monitor_index].geometry()
+        shot = pyautogui.screenshot(region=(geometry.x(), geometry.y(), geometry.width(), geometry.height()))
+        shot.monitor_offset = (geometry.x(), geometry.y())
+        return shot
+
+    @staticmethod
+    def _to_absolute(point, screenshot):
+        """Локальные координаты скриншота -> абсолютные экранные."""
+        offset = getattr(screenshot, "monitor_offset", (0, 0))
+        return point[0] + offset[0], point[1] + offset[1]
+
     def locate_control_area_opencv(self):
         """ Automatically tries to find the painting control area with opencv.
         Returns:    ctrl_x,
@@ -771,7 +766,9 @@ class rustDaVinci():
                     ctrl_h
                     False, if no control area was found
         """
-        screenshot = pyautogui.screenshot()
+        screenshot = self._screenshot_active_monitor()
+        if screenshot is None:
+            return False
         screen_w, screen_h = screenshot.size
 
         image_gray = cv2.cvtColor(numpy.array(screenshot), cv2.COLOR_BGR2GRAY)
@@ -797,7 +794,8 @@ class rustDaVinci():
             if x_list:
                 x_coord = int(sum(x_list) / len(x_list))
                 y_coord = int(sum(y_list) / len(y_list))
-                return x_coord, y_coord, tmpl_w, tmpl_h
+                abs_x, abs_y = self._to_absolute((x_coord, y_coord), screenshot)
+                return abs_x, abs_y, tmpl_w, tmpl_h
 
             tmpl_w, tmpl_h = int(tmpl.shape[1]*1.035), int(tmpl.shape[0]*1.035)
             tmpl = cv2.resize(tmpl, (int(tmpl_w), int(tmpl_h)))
@@ -952,7 +950,8 @@ class rustDaVinci():
 
         # Собираем цвета с количеством пикселей, исключая пропускаемые.
         color_stats = []
-        for color in self.quantized_img.getcolors():
+        color_counts = self.quantized_img.getcolors(maxcolors=self.canvas_w * self.canvas_h) or []
+        for color in color_counts:
             if color[1] not in self.skip_colors:
                 self.tot_pixels += color[0]
                 color_stats.append((color[0], color[1]))  # (count, color_index)
@@ -1091,7 +1090,7 @@ class rustDaVinci():
 
         hex_x = self._setting_int("brush_hex_x", 0)
         hex_y = self._setting_int("brush_hex_y", 0)
-        if hex_x == 0 and hex_y == 0:
+        if hex_x == 0 or hex_y == 0:
             return
 
         # текущий цвет в HEX без #
@@ -1361,10 +1360,12 @@ class rustDaVinci():
         self.paint_start_time = time.time()
 
         self.paint_thread = PaintingWorker(self, self.parent)
-        self.paint_thread.log.connect(self._append_log)
-        self.paint_thread.progress.connect(self._set_progress)
-        self.paint_thread.finished_ok.connect(lambda _elapsed: self.shutdown(self.paint_listener, self.paint_start_time, 0))
-        self.paint_thread.aborted.connect(lambda _elapsed: self.shutdown(self.paint_listener, self.paint_start_time, 1))
+        if self.ui_bridge is None:
+            self.ui_bridge = _UiBridge(self, self.parent)
+        self.paint_thread.log.connect(self.ui_bridge.log.emit)
+        self.paint_thread.progress.connect(self.ui_bridge.progress.emit)
+        self.paint_thread.finished_ok.connect(self.ui_bridge.finished_ok.emit)
+        self.paint_thread.aborted.connect(self.ui_bridge.aborted.emit)
         self.paint_thread.finished.connect(self._on_paint_thread_finished)
         self.paint_thread.start()
 

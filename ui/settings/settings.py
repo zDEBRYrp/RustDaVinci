@@ -33,11 +33,8 @@ class Settings(QDialog):
         self.isSettingsChanged = False
         self.isColorsOpened = False
 
-        try:
-            ctrl_w = int(self.settings.value("ctrl_w", default_settings["ctrl_w"]))
-            ctrl_h = int(self.settings.value("ctrl_h", default_settings["ctrl_h"]))
-        except (TypeError, ValueError):
-            ctrl_w, ctrl_h = 0, 0
+        ctrl_w = self._safe_int(self.settings.value("ctrl_w", default_settings["ctrl_w"]), 0)
+        ctrl_h = self._safe_int(self.settings.value("ctrl_h", default_settings["ctrl_h"]), 0)
         if not (ctrl_w == 0 or ctrl_h == 0):
             self.parent.rustDaVinci.calculate_ctrl_tools_positioning()
             self.ui.show_ctrl_PushButton.setEnabled(True)
@@ -84,7 +81,6 @@ class Settings(QDialog):
         self.ui.double_click_CheckBox.stateChanged.connect(self.enableApply)
         self.ui.show_info_CheckBox.stateChanged.connect(self.enableApply)
         self.ui.show_preview_CheckBox.stateChanged.connect(self.enableApply)
-        self.ui.hide_preview_CheckBox.stateChanged.connect(self.enableApply)
         self.ui.paint_background_CheckBox.stateChanged.connect(self.enableApply)
         self.ui.opacities_CheckBox.stateChanged.connect(self.enableApply)
         self.ui.hidden_colors_CheckBox.stateChanged.connect(self.enableApply)
@@ -109,6 +105,21 @@ class Settings(QDialog):
         self.ui.min_line_width_LineEdit.textChanged.connect(self.enableApply)
 
 
+    @staticmethod
+    def _safe_int(value, default):
+        try:
+            if isinstance(value, bool):
+                return int(value)
+            if value is None:
+                return int(default)
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return int(default)
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
     def enableApply(self):
         """ When a settings is changed, enable the apply button. """
         self.isSettingsChanged = True
@@ -126,21 +137,14 @@ class Settings(QDialog):
         self.setting_to_checkbox("double_click", self.ui.double_click_CheckBox, default_settings["double_click"])
         self.setting_to_checkbox("show_information", self.ui.show_info_CheckBox, default_settings["show_information"])
         self.setting_to_checkbox("show_preview_load", self.ui.show_preview_CheckBox, default_settings["show_preview_load"])
-        self.setting_to_checkbox("hide_preview_paint", self.ui.hide_preview_CheckBox, default_settings["hide_preview_paint"])
         self.setting_to_checkbox("paint_background", self.ui.paint_background_CheckBox, default_settings["paint_background"])
         self.setting_to_checkbox("brush_opacities", self.ui.opacities_CheckBox, default_settings["brush_opacities"])
         self.setting_to_checkbox("hidden_colors", self.ui.hidden_colors_CheckBox, default_settings["hidden_colors"])
 
         # Comboboxes
-        try:
-            index = int(self.settings.value("quality", default_settings["quality"]))
-        except (TypeError, ValueError):
-            index = int(default_settings["quality"])
+        index = self._safe_int(self.settings.value("quality", default_settings["quality"]), default_settings["quality"])
         self.ui.quality_ComboBox.setCurrentIndex(max(0, min(index, self.ui.quality_ComboBox.count() - 1)))
-        try:
-            index = int(self.settings.value("brush_type", default_settings["brush_type"]))
-        except (TypeError, ValueError):
-            index = int(default_settings["brush_type"])
+        index = self._safe_int(self.settings.value("brush_type", default_settings["brush_type"]), default_settings["brush_type"])
         self.ui.brush_type_ComboBox.setCurrentIndex(max(0, min(index, self.ui.brush_type_ComboBox.count() - 1)))
 
         # Monitor selection
@@ -152,10 +156,7 @@ class Settings(QDialog):
             name = screen.name()
             label = f"{i+1}: {name} ({geometry.width()}x{geometry.height()})"
             self.ui.monitor_ComboBox.addItem(label, i)
-        try:
-            saved_monitor = int(self.settings.value("monitor_index", 0))
-        except (TypeError, ValueError):
-            saved_monitor = 0
+        saved_monitor = self._safe_int(self.settings.value("monitor_index", 0), 0)
         if self.ui.monitor_ComboBox.count() > 0:
             saved_monitor = max(0, min(saved_monitor, self.ui.monitor_ComboBox.count() - 1))
             self.ui.monitor_ComboBox.setCurrentIndex(saved_monitor)
@@ -197,9 +198,16 @@ class Settings(QDialog):
 
         # Listwidgets
         skip_colors = self.settings.value("skip_colors", default_settings["skip_colors"], "QStringList")
+        if skip_colors is None:
+            skip_colors = []
+        if isinstance(skip_colors, str):
+            skip_colors = [skip_colors]
         if len(skip_colors) != 0:
             for color in skip_colors:
-                rgb = hex_to_rgb(color)
+                try:
+                    rgb = hex_to_rgb(color)
+                except (TypeError, ValueError, AttributeError):
+                    continue
                 i = QListWidgetItem(color)
                 i.setBackground(QColor(rgb[0], rgb[1], rgb[2]))
                 if (rgb[0]*0.299 + rgb[1]*0.587 + rgb[2]*0.114) > 186:
@@ -211,7 +219,7 @@ class Settings(QDialog):
 
     def setting_to_checkbox(self, name, checkBox, default):
         """ Settings integer values converted to checkbox """
-        val = int(self.settings.value(name, default))
+        val = self._safe_int(self.settings.value(name, default), default)
         if val: checkBox.setCheckState(Qt.Checked)
         else: checkBox.setCheckState(Qt.Unchecked)
 
@@ -227,7 +235,6 @@ class Settings(QDialog):
         self.checkbox_to_setting("double_click", self.ui.double_click_CheckBox.isChecked())
         self.checkbox_to_setting("show_information", self.ui.show_info_CheckBox.isChecked())
         self.checkbox_to_setting("show_preview_load", self.ui.show_preview_CheckBox.isChecked())
-        self.checkbox_to_setting("hide_preview_paint", self.ui.hide_preview_CheckBox.isChecked())
         self.checkbox_to_setting("paint_background", self.ui.paint_background_CheckBox.isChecked())
         self.checkbox_to_setting("brush_opacities", self.ui.opacities_CheckBox.isChecked())
         self.checkbox_to_setting("hidden_colors", self.ui.hidden_colors_CheckBox.isChecked())
@@ -265,18 +272,14 @@ class Settings(QDialog):
 
         if self.parent.rustDaVinci.org_img is not None:
             self.parent.rustDaVinci.convert_transparency()
-            self.parent.rustDaVinci.create_pixmaps()
         if hasattr(self.parent, "update_preview"):
             try:
                 self.parent.update_preview()
             except Exception:
                 pass
 
-        try:
-            ctrl_w = int(self.settings.value("ctrl_w", default_settings["ctrl_w"]))
-            ctrl_h = int(self.settings.value("ctrl_h", default_settings["ctrl_h"]))
-        except (TypeError, ValueError):
-            ctrl_w, ctrl_h = 0, 0
+        ctrl_w = self._safe_int(self.settings.value("ctrl_w", default_settings["ctrl_w"]), 0)
+        ctrl_h = self._safe_int(self.settings.value("ctrl_h", default_settings["ctrl_h"]), 0)
         if not (ctrl_w == 0 or ctrl_h == 0):
             self.parent.rustDaVinci.calculate_ctrl_tools_positioning()
             self.ui.show_ctrl_PushButton.setEnabled(True)
@@ -303,7 +306,6 @@ class Settings(QDialog):
         self.ui.double_click_CheckBox.setCheckState(Qt.Unchecked)
         self.ui.show_info_CheckBox.setCheckState(Qt.Checked)
         self.ui.show_preview_CheckBox.setCheckState(Qt.Unchecked)
-        self.ui.hide_preview_CheckBox.setCheckState(Qt.Unchecked)
         self.ui.paint_background_CheckBox.setCheckState(Qt.Unchecked)
         self.ui.opacities_CheckBox.setCheckState(Qt.Checked)
         self.ui.hidden_colors_CheckBox.setCheckState(Qt.Unchecked)
@@ -377,16 +379,19 @@ class Settings(QDialog):
 
     def show_ctrl_clicked(self):
         """ Show where control area is located """
-        x = int(self.settings.value("ctrl_x", default_settings["ctrl_x"]))
-        y = int(self.settings.value("ctrl_y", default_settings["ctrl_y"]))
-        w = int(self.settings.value("ctrl_w", default_settings["ctrl_w"]))
-        h = int(self.settings.value("ctrl_h", default_settings["ctrl_h"]))
+        x = self._safe_int(self.settings.value("ctrl_x", default_settings["ctrl_x"]), 0)
+        y = self._safe_int(self.settings.value("ctrl_y", default_settings["ctrl_y"]), 0)
+        w = self._safe_int(self.settings.value("ctrl_w", default_settings["ctrl_w"]), 0)
+        h = self._safe_int(self.settings.value("ctrl_h", default_settings["ctrl_h"]), 0)
         show_area(x, y, w, h)
 
 
     def color_picker_clicked(self):
         """ Open a QColorDialog window """
-        rgb = hex_to_rgb(self.ui.background_LineEdit.text())
+        try:
+            rgb = hex_to_rgb(self.ui.background_LineEdit.text())
+        except (TypeError, ValueError, AttributeError):
+            rgb = hex_to_rgb(default_settings["background_color"])
         colorDialog = QColorDialog()
         selected_color = colorDialog.getColor(QColor(rgb[0], rgb[1], rgb[2]), self, "Select the default background color")
         if selected_color.isValid():

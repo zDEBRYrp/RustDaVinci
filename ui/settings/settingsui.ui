@@ -757,30 +757,11 @@ when loading new image</string>
       <bool>true</bool>
      </property>
     </widget>
-    <widget class="QCheckBox" name="hide_preview_CheckBox">
-     <property name="geometry">
-      <rect>
-       <x>20</x>
-       <y>260</y>
-       <width>341</width>
-       <height>16</height>
-      </rect>
-     </property>
-     <property name="toolTip">
-      <string>This will automatically hide the preview when the painting process starts</string>
-     </property>
-     <property name="text">
-      <string>Automatically hide painting preview before painting starts</string>
-     </property>
-     <property name="checked">
-      <bool>true</bool>
-     </property>
-    </widget>
     <widget class="QCheckBox" name="paint_background_CheckBox">
      <property name="geometry">
       <rect>
        <x>20</x>
-       <y>280</y>
+       <y>260</y>
        <width>341</width>
        <height>16</height>
       </rect>

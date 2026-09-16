@@ -191,6 +191,11 @@ class BrushCoordsDialog(QDialog):
             y_val = self.settings.value(key_y, "0")
             self._coord_edits[key]["x"].setText(str(x_val))
             self._coord_edits[key]["y"].setText(str(y_val))
+        value_keys = {"size": "brush_size", "interval": "brush_interval", "opacity": "brush_opacity"}
+        value_defaults = {"size": "15", "interval": "0.01", "opacity": "1.0"}
+        for key, setting_key in value_keys.items():
+            saved = self.settings.value(setting_key, value_defaults[key])
+            self._value_edits[key].setText("" if saved is None else str(saved))
 
     # ---------------- Coordinate selection ----------------
 
@@ -334,32 +339,49 @@ class BrushCoordsDialog(QDialog):
 
     # ---------------- Automation ----------------
 
+    @staticmethod
+    def _safe_coord(value):
+        try:
+            if value is None:
+                return 0
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return 0
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _coord_from_fields(self, coord_key):
+        """Координаты из полей диалога (fallback — QSettings). (0,0) = не задано."""
+        key_x, key_y = self._coord_keys[coord_key]
+        edits = self._coord_edits.get(coord_key)
+        x_txt = edits["x"].text().strip() if edits else ""
+        y_txt = edits["y"].text().strip() if edits else ""
+        if x_txt and y_txt:
+            x = self._safe_coord(x_txt)
+            y = self._safe_coord(y_txt)
+        else:
+            x = self._safe_coord(self.settings.value(key_x, 0))
+            y = self._safe_coord(self.settings.value(key_y, 0))
+        if x == 0 or y == 0:
+            return None
+        return x, y
+
     def _type_at_coord(self, coord_key, text, press_enter=False):
         """Кликнуть по координате и набрать текст руками (через typewrite).
 
         Используется для числовых полей (Размер, Интервал, Прозрачность).
         """
         if not text:
-            return
+            return False
 
-        key_x, key_y = self._coord_keys[coord_key]
-        # сначала пробуем взять координаты прямо из полей, чтобы не требовать "Сохранить координаты"
-        edits = self._coord_edits.get(coord_key)
-        x_txt = edits["x"].text().strip() if edits else ""
-        y_txt = edits["y"].text().strip() if edits else ""
-
-        try:
-            if x_txt and y_txt:
-                x = int(float(x_txt))
-                y = int(float(y_txt))
-            else:
-                x = int(self.settings.value(key_x, 0))
-                y = int(self.settings.value(key_y, 0))
-        except (TypeError, ValueError):
-            return
-
-        if x == 0 and y == 0:
-            return
+        point = self._coord_from_fields(coord_key)
+        if point is None:
+            return False
+        x, y = point
 
         # Один клик с небольшой паузой для фокуса
         pyautogui.click(x, y)
@@ -379,30 +401,18 @@ class BrushCoordsDialog(QDialog):
         pyautogui.typewrite(text)
         if press_enter:
             pyautogui.press("enter")
+        return True
 
     def _type_hex_at_coord(self, text):
         """Специальный ввод HEX: клик -> Backspace -> typewrite (без Ctrl+A)."""
         if not text:
-            return
+            return False
         text = text.strip().upper()
 
-        key_x, key_y = self._coord_keys["hex"]
-        edits = self._coord_edits.get("hex")
-        x_txt = edits["x"].text().strip() if edits else ""
-        y_txt = edits["y"].text().strip() if edits else ""
-
-        try:
-            if x_txt and y_txt:
-                x = int(float(x_txt))
-                y = int(float(y_txt))
-            else:
-                x = int(self.settings.value(key_x, 0))
-                y = int(self.settings.value(key_y, 0))
-        except (TypeError, ValueError):
-            return
-
-        if x == 0 and y == 0:
-            return
+        point = self._coord_from_fields("hex")
+        if point is None:
+            return False
+        x, y = point
 
         # Один клик по полю HEX
         pyautogui.click(x, y)
@@ -417,14 +427,45 @@ class BrushCoordsDialog(QDialog):
 
         # Вписать HEX вручную
         pyautogui.typewrite(text)
+        return True
+
+    def _apply_brush_value(self, coord_key):
+        """Применить числовое значение кисти (размер/интервал/прозрачность)."""
+        text = self._value_edits[coord_key].text().strip().replace(",", ".")
+        if not text:
+            return True
+        try:
+            number = float(text)
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "Некорректное число: %s" % text)
+            return False
+        limits = {"size": (1, 100), "interval": (0.01, 1.0), "opacity": (0.01, 1.0)}
+        minimum, maximum = limits[coord_key]
+        if not minimum <= number <= maximum:
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Значение вне диапазона %s–%s: %s" % (minimum, maximum, text),
+            )
+            return False
+        if self._type_at_coord(coord_key, text):
+            self.settings.setValue({"size": "brush_size", "interval": "brush_interval", "opacity": "brush_opacity"}[coord_key], text)
+            return True
+        QMessageBox.warning(self, "Ошибка", "Сначала задайте координаты поля (кнопка X).")
+        return False
 
     def _on_apply_clicked(self):
-        """Автоматически менять только HEX. Остальное пользователь вводит вручную."""
+        """Применить значения кисти и HEX в игре."""
+        for coord_key in ("size", "interval", "opacity"):
+            if not self._apply_brush_value(coord_key):
+                return
         hex_txt = self._value_edits["hex"].text().strip()
-
         if hex_txt:
             if hex_txt.startswith("#"):
                 hex_txt = hex_txt[1:]
-            self._type_hex_at_coord(hex_txt)
+            if len(hex_txt) != 6 or any(c not in "0123456789ABCDEFabcdef" for c in hex_txt):
+                QMessageBox.warning(self, "Ошибка", "HEX должен быть вида RRGGBB: %s" % hex_txt)
+                return
+            if not self._type_hex_at_coord(hex_txt):
+                QMessageBox.warning(self, "Ошибка", "Сначала задайте координаты поля HEX (кнопка X).")
 
 
